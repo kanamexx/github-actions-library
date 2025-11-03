@@ -1,0 +1,119 @@
+name: Create issue and add to project
+
+on:
+  push:
+  workflow_dispatch:
+    inputs:
+      body:
+        description: 'Issue body (optional)'
+        required: false
+      project_type:
+        description: 'Project type: v2 or classic'
+        required: true
+        default: 'v2'
+      project_id:
+        description: 'Projects v2: project GraphQL node ID (required for v2)'
+        required: false
+      project_title:
+        description: 'Projects v2: project title (will be used to look up project id if project_id not provided)'
+        required: false
+      project_number:
+        description: 'Classic project number (visible in URL) — required for classic'
+        required: false
+      column_name:
+        description: 'Classic project column name to add the issue into (required for classic)'
+        required: false
+
+jobs:
+  create-and-add:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Create issue
+        id: create_issue
+        uses: actions/github-script@v6
+        with:
+          github-token: ${{ secrets.PAT || github.token }}
+          script: |
+            const inputs = context.payload.inputs || {};
+            let title = inputs.title; // may be undefined (kept for backward compatibility)
+            const body = inputs.body || '';
+            // If no title provided, use first line of body or a timestamped default
+            if (!title || title.trim().length === 0) {
+              if (body && body.trim().length > 0) {
+                title = body.split(/\r?\n/)[0].slice(0, 80);
+              } else {
+                title = `Issue created via workflow at ${new Date().toISOString()}`;
+              }
+            }
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const issue = await github.rest.issues.create({ owner, repo, title, body });
+            core.setOutput('issue_number', issue.data.number);
+            core.setOutput('issue_node_id', issue.data.node_id);
+            core.setOutput('issue_id', issue.data.id);
+            console.log(`Created issue #${issue.data.number}`);
+
+      - name: Add to Classic Project (if selected)
+        if: ${{ github.event.inputs.project_type == 'classic' }}
+        id: classic
+        uses: actions/github-script@v6
+        with:
+          github-token: ${{ secrets.PAT || github.token }}
+          script: |
+            const inputs = context.payload.inputs || {};
+            const projectNumber = inputs.project_number;
+            const columnName = inputs.column_name;
+            if (!projectNumber) throw new Error('project_number is required for classic projects');
+            if (!columnName) throw new Error('column_name is required for classic projects');
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            // find project by number
+            const projects = await github.rest.projects.listForRepo({ owner, repo });
+            const project = projects.data.find(p => String(p.number) === String(projectNumber));
+            if (!project) throw new Error(`Project with number ${projectNumber} not found`);
+            const projectId = project.id;
+            // list columns and find by name
+            const cols = await github.rest.projects.listColumns({ project_id: projectId });
+            const col = cols.data.find(c => c.name === columnName);
+            if (!col) throw new Error(`Column '${columnName}' not found in project ${projectNumber}`);
+            const columnId = col.id;
+            const issueId = parseInt(core.getInput('issue_id') || '0');
+            if (!issueId) throw new Error('issue_id output missing');
+            // create card
+            await github.rest.projects.createCard({ column_id: columnId, content_id: issueId, content_type: 'Issue' });
+            core.setOutput('added', 'true');
+            console.log(`Added issue to classic project ${projectNumber} column ${columnName}`);
+
+      - name: Add to Projects v2 (if selected)
+        if: ${{ github.event.inputs.project_type == 'v2' }}
+        id: v2
+        uses: actions/github-script@v6
+        with:
+          github-token: ${{ secrets.PAT || github.token }}
+          script: |
+            const inputs = context.payload.inputs || {};
+            let projectId = inputs.project_id;
+            const projectTitle = inputs.project_title;
+            // if project_id not provided, try to find by title
+            if (!projectId) {
+              if (!projectTitle) throw new Error('Either project_id or project_title is required for v2 projects');
+              const owner = context.repo.owner;
+              const repo = context.repo.repo;
+              const query = `query($owner:String!, $repo:String!, $first:Int!) {\n  repository(owner:$owner, name:$repo) {\n    projectsV2(first:$first) {\n      nodes { id title }\n    }\n  }\n}`;
+              const resp = await github.graphql(query, { owner, repo, first: 100 });
+              const nodes = resp.repository.projectsV2.nodes || [];
+              const found = nodes.find(n => n.title === projectTitle);
+              if (!found) throw new Error(`Projects v2 with title '${projectTitle}' not found`);
+              projectId = found.id;
+            }
+            const contentId = '${{ steps.create_issue.outputs.issue_node_id }}';
+            if (!contentId) throw new Error('issue_node_id is required to add to project v2');
+            const mutation = `mutation($projectId: ID!, $contentId: ID!) {\n  addProjectV2ItemById(input: {projectId: $projectId, contentId: $contentId}) {\n    item { id }\n  }\n}`;
+            const result = await github.graphql(mutation, { projectId, contentId });
+            core.setOutput('added', 'true');
+            console.log('Added issue to Projects v2', result);
+
+      - name: Result
+        run: |
+          echo "Issue created: #${{ steps.create_issue.outputs.issue_number }}"
+          echo "Added to project: ${{ steps.classic.outputs.added }}${{ steps.v2.outputs.added }}"

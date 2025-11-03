@@ -1,0 +1,45 @@
+name: Auto-add new issues to Projects v2
+
+on:
+  issues:
+    types: [opened]
+
+permissions:
+  issues: write
+  contents: read
+  projects: write
+
+jobs:
+  add-to-project-v2:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Add issue to Projects v2
+        uses: actions/github-script@v6
+        with:
+          github-token: ${{ secrets.PAT || github.token }}
+          script: |
+            // Environment secrets (optional): PROJECT_V2_ID or PROJECT_V2_TITLE
+            const projectIdSecret = process.env.PROJECT_V2_ID;
+            const projectTitleSecret = process.env.PROJECT_V2_TITLE;
+            const contentId = context.payload.issue && context.payload.issue.node_id;
+            if (!contentId) throw new Error('Missing issue node id (contentId)');
+
+            let projectId = projectIdSecret;
+            if (!projectId) {
+              if (!projectTitleSecret) throw new Error('Set secrets.PROJECT_V2_ID or secrets.PROJECT_V2_TITLE to enable auto-add to Projects v2');
+              const owner = context.repo.owner;
+              const repo = context.repo.repo;
+              const query = `query($owner:String!, $repo:String!, $first:Int!) {\n  repository(owner:$owner, name:$repo) {\n    projectsV2(first:$first) {\n      nodes { id title }\n    }\n  }\n}`;
+              const resp = await github.graphql(query, { owner, repo, first: 100 });
+              const nodes = resp.repository.projectsV2.nodes || [];
+              const found = nodes.find(n => n.title === projectTitleSecret);
+              if (!found) throw new Error(`Projects v2 with title '${projectTitleSecret}' not found`);
+              projectId = found.id;
+            }
+
+            const mutation = `mutation($projectId: ID!, $contentId: ID!) {\n  addProjectV2ItemById(input: {projectId: $projectId, contentId: $contentId}) {\n    item { id }\n  }\n}`;
+            const result = await github.graphql(mutation, { projectId, contentId });
+            console.log('Added issue to Projects v2:', result);
+        env:
+          PROJECT_V2_ID: ${{ secrets.PROJECT_V2_ID }}
+          PROJECT_V2_TITLE: ${{ secrets.PROJECT_V2_TITLE }}
