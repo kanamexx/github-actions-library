@@ -28,31 +28,6 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Prepare issue title and body
-        id: prepare
-        run: |
-          set -euo pipefail
-          TEMPLATE="${{ github.event.inputs.template }}"
-          if [ -n "$TEMPLATE" ]; then
-            FILE=".github/ISSUE_TEMPLATE/$TEMPLATE"
-            if [ ! -f "$FILE" ]; then
-              echo "Template '$FILE' not found" >&2
-              exit 1
-            fi
-            BODY_CONTENT="$(cat "$FILE")"
-          else
-            BODY_CONTENT="${{ github.event.inputs.body }}"
-          fi
-          # Derive title from first non-empty line of body (max 80 chars)
-          TITLE_LINE="$(echo "$BODY_CONTENT" | sed -n '/./{p;q}' | head -n1 | cut -c1-80)"
-          if [ -z "$TITLE_LINE" ]; then
-            TITLE_LINE="Issue created via workflow at $(date --utc +%Y-%m-%dT%H:%M:%SZ)"
-          fi
-          echo "title=$TITLE_LINE" >> $GITHUB_OUTPUT
-          echo "body<<EOF" >> $GITHUB_OUTPUT
-          echo "$BODY_CONTENT" >> $GITHUB_OUTPUT
-          echo "EOF" >> $GITHUB_OUTPUT
-
       - name: Create issue (peter-evans/create-issue)
         id: create_issue
         uses: peter-evans/create-issue@v4
@@ -115,26 +90,6 @@ name: Create issue and add to project
 on:
   push:
   workflow_dispatch:
-    inputs:
-      body:
-        description: 'Issue body (optional)'
-        required: false
-      project_type:
-        description: 'Project type: v2 or classic'
-        required: true
-        default: 'v2'
-      project_id:
-        description: 'Projects v2: project GraphQL node ID (required for v2)'
-        required: false
-      project_title:
-        description: 'Projects v2: project title (will be used to look up project id if project_id not provided)'
-        required: false
-      project_number:
-        description: 'Classic project number (visible in URL) — required for classic'
-        required: false
-      column_name:
-        description: 'Classic project column name to add the issue into (required for classic)'
-        required: false
 
 jobs:
   create-and-add:
