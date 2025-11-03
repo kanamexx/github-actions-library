@@ -1,3 +1,115 @@
+name: Create issue from template and add to project
+
+on:
+  workflow_dispatch:
+    inputs:
+      template:
+        description: 'Issue template filename under .github/ISSUE_TEMPLATE (e.g. bug_report.md). If empty, use body input.'
+        required: false
+      body:
+        description: 'Issue body (optional, used if template not provided)'
+        required: false
+      project_type:
+        description: 'Project type: v2 (classic projects removed)'
+        required: true
+        default: 'v2'
+      project_id:
+        description: 'Projects v2: project GraphQL node ID (optional if project_title provided)'
+        required: false
+      project_title:
+        description: 'Projects v2: project title (used to look up project id if project_id not provided)'
+        required: false
+      # classic project inputs removed
+
+jobs:
+  create-and-add:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Prepare issue title and body
+        id: prepare
+        run: |
+          set -euo pipefail
+          TEMPLATE="${{ github.event.inputs.template }}"
+          if [ -n "$TEMPLATE" ]; then
+            FILE=".github/ISSUE_TEMPLATE/$TEMPLATE"
+            if [ ! -f "$FILE" ]; then
+              echo "Template '$FILE' not found" >&2
+              exit 1
+            fi
+            BODY_CONTENT="$(cat "$FILE")"
+          else
+            BODY_CONTENT="${{ github.event.inputs.body }}"
+          fi
+          # Derive title from first non-empty line of body (max 80 chars)
+          TITLE_LINE="$(echo "$BODY_CONTENT" | sed -n '/./{p;q}' | head -n1 | cut -c1-80)"
+          if [ -z "$TITLE_LINE" ]; then
+            TITLE_LINE="Issue created via workflow at $(date --utc +%Y-%m-%dT%H:%M:%SZ)"
+          fi
+          echo "title=$TITLE_LINE" >> $GITHUB_OUTPUT
+          echo "body<<EOF" >> $GITHUB_OUTPUT
+          echo "$BODY_CONTENT" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+      - name: Create issue (peter-evans/create-issue)
+        id: create_issue
+        uses: peter-evans/create-issue@v4
+        with:
+          title: ${{ steps.prepare.outputs.title }}
+          body: ${{ steps.prepare.outputs.body }}
+
+      - name: Get created issue details
+        id: get_issue
+        uses: actions/github-script@v6
+        with:
+          github-token: ${{ secrets.PAT || github.token }}
+          script: |
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const issueNumber = parseInt('${{ steps.create_issue.outputs.issue-number }}');
+            if (!issueNumber) throw new Error('Missing issue number from create-issue output');
+            const issue = await github.rest.issues.get({ owner, repo, issue_number: issueNumber });
+            core.setOutput('issue_number', String(issue.data.number));
+            core.setOutput('issue_node_id', issue.data.node_id);
+            core.setOutput('issue_id', String(issue.data.id));
+            console.log('Created issue', issue.data.number);
+
+      # Classic Projects support removed. If you need classic project support re-add the step and inputs.
+
+      - name: Add to Projects v2 (if selected)
+        if: ${{ github.event.inputs.project_type == 'v2' }}
+        id: v2
+        uses: actions/github-script@v6
+        with:
+          github-token: ${{ secrets.PAT || github.token }}
+          script: |
+            const inputs = context.payload.inputs || {};
+            let projectId = inputs.project_id;
+            const projectTitle = inputs.project_title;
+            if (!projectId) {
+              if (!projectTitle) throw new Error('Either project_id or project_title is required for v2 projects');
+              const owner = context.repo.owner;
+              const repo = context.repo.repo;
+              const query = `query($owner:String!, $repo:String!, $first:Int!) {\n  repository(owner:$owner, name:$repo) {\n    projectsV2(first:$first) {\n      nodes { id title }\n    }\n  }\n}`;
+              const resp = await github.graphql(query, { owner, repo, first: 100 });
+              const nodes = resp.repository.projectsV2.nodes || [];
+              const found = nodes.find(n => n.title === projectTitle);
+              if (!found) throw new Error(`Projects v2 with title '${projectTitle}' not found`);
+              projectId = found.id;
+            }
+            const contentId = '${{ steps.get_issue.outputs.issue_node_id }}';
+            if (!contentId) throw new Error('issue_node_id is required to add to project v2');
+            const mutation = `mutation($projectId: ID!, $contentId: ID!) {\n  addProjectV2ItemById(input: {projectId: $projectId, contentId: $contentId}) {\n    item { id }\n  }\n}`;
+            const result = await github.graphql(mutation, { projectId, contentId });
+            core.setOutput('added', 'true');
+            console.log('Added issue to Projects v2', result);
+
+      - name: Result
+        run: |
+          echo "Issue created: #${{ steps.get_issue.outputs.issue_number }}"
+          echo "Added to project: ${{ steps.classic.outputs.added }}${{ steps.v2.outputs.added }}"
 name: Create issue and add to project
 
 on:
